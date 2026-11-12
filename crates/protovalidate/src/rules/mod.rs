@@ -35,22 +35,19 @@ use buffa_descriptor::MessageIndex;
 use crate::cel;
 use crate::protobuf::{Field, Oneof, Runtime, Scalar, Singular};
 use crate::validate::FieldPathElement;
+use crate::violation::RuleInfo;
 use standard::{
     AnyTest, Check, Cmp, Duration, FieldMaskTest, ListTest, MapTest, ScalarChecks, TimestampTest,
 };
 
 /// A CEL expression, and what it reports when it fails.
 pub(crate) struct CelRule {
-    pub id: String,
-    pub message: String,
+    /// The rule's id, message and rule path.
+    pub rule: Arc<RuleInfo>,
     pub expression: String,
     /// The field of the rules message `rule` is bound to while the
     /// expression runs, or 0 for none.
     pub rule_field_number: i32,
-    /// The rule path, from `FieldRules` down: `[FieldRules.cel[i]]` for a
-    /// custom rule, `[FieldRules.string, (pkg.rule)]` for a predefined one,
-    /// empty for a message-level one.
-    pub rule_path: Vec<FieldPathElement>,
 }
 
 /// CEL expressions compiled together, evaluated against one `this`.

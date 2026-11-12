@@ -32,23 +32,19 @@ pub(crate) mod wellknown;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use buffa_descriptor::EnumIndex;
 
-use crate::validate::FieldPathElement;
+use crate::violation::RuleInfo;
 pub(crate) use format::{Double, Duration, Timestamp, total_nanos};
 pub(crate) use regex::Regex;
 
 /// One standard rule against one value.
 pub(crate) struct Check<T> {
-    /// The rule id, such as `int32.gt_lt`.
-    pub id: String,
-    pub message: String,
-    /// The rule path, from `FieldRules` down: `[FieldRules.int32,
-    /// Int32Rules.gt]`, or `[FieldRules.repeated, RepeatedRules.items,
-    /// FieldRules.int32, Int32Rules.gt]` for an element.
-    pub rule_path: Vec<FieldPathElement>,
+    /// The rule's id, message and rule path.
+    pub rule: Arc<RuleInfo>,
     pub test: T,
 }
 

@@ -23,6 +23,7 @@
 use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 
 use buffa_descriptor::{DescriptorPool, MessageIndex};
 
@@ -42,7 +43,8 @@ use crate::protobuf::{
     Field, Key, Kind, List as _, Map as _, Message as _, Runtime, Scalar, Singular, Val, read,
 };
 use crate::validate::__buffa::oneof::field_path_element::Subscript;
-use crate::validate::{FieldPath, FieldPathElement, Violation};
+use crate::validate::FieldPathElement;
+use crate::violation::{RuleInfo, Violation};
 
 /// Why the walk stopped before the end of the message.
 pub(crate) enum Abort<E> {
@@ -103,28 +105,29 @@ impl Violations {
     /// Records a violation of the value being validated. Its field path is
     /// filled in by the fields that the walk returns through. When failing
     /// fast, the walk stops here.
-    fn push<E>(
-        &mut self,
-        id: &str,
-        message: String,
-        rule_path: &[FieldPathElement],
-    ) -> Result<(), Abort<E>> {
-        let rule = (!rule_path.is_empty()).then(|| FieldPath {
-            elements: rule_path.to_vec(),
-            ..Default::default()
-        });
-        self.list.push(Violation {
-            rule: rule.into(),
-            rule_id: Some(id.to_owned()),
-            message: Some(message),
-            for_key: self.for_key.then_some(true),
-            ..Default::default()
-        });
+    fn push<E>(&mut self, rule: &Arc<RuleInfo>, message: Option<String>) -> Result<(), Abort<E>> {
+        self.list
+            .push(Violation::new(Arc::clone(rule), message, self.for_key));
         if self.fail_fast {
             Err(Abort::FailFast)
         } else {
             Ok(())
         }
+    }
+
+    /// Records a violation of a rule that has no compiled check.
+    fn push_rule<E>(
+        &mut self,
+        id: &str,
+        message: String,
+        path: &[FieldPathElement],
+    ) -> Result<(), Abort<E>> {
+        let rule = RuleInfo {
+            id: id.to_owned(),
+            message,
+            path: path.to_vec(),
+        };
+        self.push(&Arc::new(rule), None)
     }
 
     /// Appends `element`, with the subscript that `subscript` computes, to
@@ -148,11 +151,7 @@ impl Violations {
         let mut element = element.clone();
         element.subscript = subscript()?;
         for violation in violations {
-            violation
-                .field
-                .get_or_insert_default()
-                .elements
-                .push(element.clone());
+            violation.field_mut().push(element.clone());
         }
         Ok(())
     }
@@ -160,9 +159,7 @@ impl Violations {
     /// The violations, with their field paths starting from the root.
     fn finish(mut self) -> Vec<Violation> {
         for violation in &mut self.list {
-            if let Some(field) = violation.field.as_option_mut() {
-                field.elements.reverse();
-            }
+            violation.field_mut().reverse();
         }
         self.list
     }
@@ -369,25 +366,29 @@ impl CelPrograms {
     fn run<E>(&self, this: This<'_>, out: &mut Violations) -> Result<(), Abort<E>> {
         for (index, meta) in self.rules.iter().enumerate() {
             let value = self.program.eval(index, this).map_err(|error| {
-                Error::Evaluation(format!("error evaluating {}: {}", meta.id, error.message()))
+                Error::Evaluation(format!(
+                    "error evaluating {}: {}",
+                    meta.rule.id,
+                    error.message()
+                ))
             })?;
             let message = match value {
                 Value::Bool(true) => continue,
-                Value::Bool(false) if meta.message.is_empty() => {
-                    format!("\"{}\" returned false", meta.expression)
+                Value::Bool(false) if meta.rule.message.is_empty() => {
+                    Some(format!("\"{}\" returned false", meta.expression))
                 }
-                Value::Bool(false) => meta.message.clone(),
+                Value::Bool(false) => None,
                 Value::String(text) if text.is_empty() => continue,
-                Value::String(text) => text,
+                Value::String(text) => Some(text),
                 Value::Other => {
                     return Err(Error::Evaluation(format!(
                         "expression {} outputs an unexpected type, wanted either bool or string",
-                        meta.id
+                        meta.rule.id
                     ))
                     .into());
                 }
             };
-            out.push(&meta.id, message, &meta.rule_path)?;
+            out.push(&meta.rule, message)?;
         }
         Ok(())
     }
@@ -407,11 +408,11 @@ impl<R: Runtime> MessageOneof<R> {
         }
         if set > 1 {
             let message = format!("only one of {} can be set", self.names);
-            walk.out.push("message.oneof", message, &[])?;
+            walk.out.push_rule("message.oneof", message, &[])?;
         }
         if self.required && set == 0 {
             let message = format!("one of {} must be set", self.names);
-            walk.out.push("message.oneof", message, &[])?;
+            walk.out.push_rule("message.oneof", message, &[])?;
         }
         Ok(())
     }
@@ -431,7 +432,7 @@ impl<R: Runtime> OneofRequired<R> {
             return Ok(());
         }
         walk.at(&self.element, |walk| {
-            walk.out.push(
+            walk.out.push_rule(
                 "required",
                 "exactly one field is required in oneof".to_owned(),
                 &[],
@@ -674,7 +675,7 @@ impl<R: Runtime> FieldHeader<R> {
         let required = std::slice::from_ref(&walk.schema.required);
         walk.at(&self.element, |walk| {
             walk.out
-                .push("required", "value is required".to_owned(), required)
+                .push_rule("required", "value is required".to_owned(), required)
         })
     }
 
@@ -1068,7 +1069,7 @@ fn run_with<T, E>(
 ) -> Result<(), Abort<E>> {
     for check in checks {
         if fails(&check.test)? {
-            out.push(&check.id, check.message.clone(), &check.rule_path)?;
+            out.push(&check.rule, None)?;
         }
     }
     Ok(())

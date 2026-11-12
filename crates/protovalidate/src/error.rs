@@ -16,7 +16,7 @@ use std::fmt;
 
 use buffa::Message as _;
 
-use crate::validate::{Violation as ViolationPb, Violations};
+use crate::validate::Violations;
 use crate::violation::Violation;
 
 /// A descriptor that could not be registered.
@@ -94,10 +94,8 @@ pub struct ValidationError {
 }
 
 impl ValidationError {
-    pub(crate) fn new(violations: Vec<ViolationPb>) -> Self {
-        Self {
-            violations: violations.into_iter().map(Violation::new).collect(),
-        }
+    pub(crate) fn new(violations: Vec<Violation>) -> Self {
+        Self { violations }
     }
 
     /// The violations, in the order they were found.
@@ -110,11 +108,7 @@ impl ValidationError {
     #[must_use]
     pub fn encode_violations(&self) -> Vec<u8> {
         Violations {
-            violations: self
-                .violations
-                .iter()
-                .map(|violation| violation.proto().clone())
-                .collect(),
+            violations: self.violations.iter().map(Violation::proto).collect(),
             ..Default::default()
         }
         .encode_to_vec()
@@ -157,9 +151,22 @@ impl fmt::Display for ValidationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ValidationError, ViolationPb};
+    use std::sync::Arc;
 
-    fn violation(message: &str) -> ViolationPb {
+    use super::ValidationError;
+    use crate::validate::{Violation as ViolationPb, Violations};
+    use crate::violation::{RuleInfo, Violation};
+
+    fn violation(message: &str) -> Violation {
+        let rule = RuleInfo {
+            id: "rule".to_owned(),
+            message: message.to_owned(),
+            path: Vec::new(),
+        };
+        Violation::new(Arc::new(rule), None, false)
+    }
+
+    fn proto(message: &str) -> ViolationPb {
         ViolationPb {
             message: Some(message.to_owned()),
             rule_id: Some("rule".to_owned()),
@@ -179,6 +186,15 @@ mod tests {
             display(&["bad", "worse", "worst"]),
             "bad, and 2 more violations"
         );
+    }
+
+    #[test]
+    fn encodes_the_violations() {
+        use buffa::Message as _;
+
+        let error = ValidationError::new(vec![violation("bad"), violation("worse")]);
+        let decoded = Violations::decode_from_slice(&error.encode_violations()).unwrap();
+        assert_eq!(decoded.violations, vec![proto("bad"), proto("worse")]);
     }
 
     #[test]

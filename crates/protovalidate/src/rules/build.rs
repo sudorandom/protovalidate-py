@@ -44,6 +44,7 @@ use crate::protobuf::{Field, Oneof, Resolver, Runtime};
 use crate::validate::__buffa::oneof::field_path_element::Subscript;
 use crate::validate::__buffa::oneof::field_rules::Type as RulesType;
 use crate::validate::{FieldPathElement, FieldRules, Ignore, MessageOneofRule, Rule};
+use crate::violation::RuleInfo;
 
 /// Compiles the rules of message types.
 pub(crate) struct Builder<'a, R: Runtime> {
@@ -261,11 +262,13 @@ impl CelExpressions {
 
     fn push(&mut self, rule: Rule, rule_field_number: i32, rule_path: Vec<FieldPathElement>) {
         self.rules.push(CelRule {
-            id: rule.id.unwrap_or_default(),
-            message: rule.message.unwrap_or_default(),
+            rule: Arc::new(RuleInfo {
+                id: rule.id.unwrap_or_default(),
+                message: rule.message.unwrap_or_default(),
+                path: rule_path,
+            }),
             expression: rule.expression.unwrap_or_default(),
             rule_field_number,
-            rule_path,
         });
     }
 }
@@ -281,11 +284,13 @@ fn custom_rules(
     let mut expressions = CelExpressions::new();
     for (index, expression) in cel_expression.into_iter().enumerate() {
         expressions.rules.push(CelRule {
-            id: expression.clone(),
-            message: String::new(),
+            rule: Arc::new(RuleInfo {
+                id: expression.clone(),
+                message: String::new(),
+                path: expression_path(index),
+            }),
             expression,
             rule_field_number: 0,
-            rule_path: expression_path(index),
         });
     }
     for (index, rule) in cel.into_iter().enumerate() {
@@ -1126,7 +1131,7 @@ impl<'a, R: Runtime> Builder<'a, R> {
                             self.env
                                 .compile(bound, std::slice::from_ref(expression))
                                 .err()
-                                .map(|error| (rule.id.as_str(), error))
+                                .map(|error| (rule.rule.id.as_str(), error))
                         });
                 return Err(match culprit {
                     Some((id, error)) => {
@@ -1266,10 +1271,11 @@ mod tests {
             .as_ref()
             .expect("test_len is checked by its predefined CEL");
         assert_eq!(predefined.rules.len(), 1);
-        assert_eq!(predefined.rules[0].id, "string.test_len");
-        assert_eq!(predefined.rules[0].message, "must be test_len long");
-        let rule_path: Vec<&str> = predefined.rules[0]
-            .rule_path
+        let rule = &predefined.rules[0].rule;
+        assert_eq!(rule.id, "string.test_len");
+        assert_eq!(rule.message, "must be test_len long");
+        let rule_path: Vec<&str> = rule
+            .path
             .iter()
             .filter_map(|element| element.field_name.as_deref())
             .collect();

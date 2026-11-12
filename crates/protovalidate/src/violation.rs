@@ -13,55 +13,85 @@
 // limitations under the License.
 
 use std::fmt::{self, Write as _};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::validate::__buffa::oneof::field_path_element::Subscript;
-use crate::validate::{FieldPath, Violation as ViolationPb};
+use crate::validate::{FieldPath, FieldPathElement, Violation as ViolationPb};
 
-/// A single rule violation, together with its Protobuf form.
+/// A rule's id, message and path, shared by its violations.
+#[derive(Debug)]
+pub(crate) struct RuleInfo {
+    /// The rule id.
+    pub id: String,
+    /// The rule's message.
+    pub message: String,
+    /// The rule path.
+    pub path: Vec<FieldPathElement>,
+}
+
+/// A single rule violation.
 #[derive(Clone, Debug)]
 pub(crate) struct Violation {
-    proto: ViolationPb,
+    rule: Arc<RuleInfo>,
+    /// Overrides the rule's message.
+    message: Option<String>,
+    /// The path to the field.
+    field: Vec<FieldPathElement>,
+    for_key: bool,
     /// Rendered on first use.
     field_path: OnceLock<String>,
 }
 
-impl PartialEq for Violation {
-    fn eq(&self, other: &Self) -> bool {
-        self.proto == other.proto
-    }
-}
-
 impl Violation {
-    pub(crate) fn new(proto: ViolationPb) -> Self {
+    pub(crate) fn new(rule: Arc<RuleInfo>, message: Option<String>, for_key: bool) -> Self {
         Self {
+            rule,
+            message,
+            field: Vec::new(),
+            for_key,
             field_path: OnceLock::new(),
-            proto,
         }
+    }
+
+    /// The field path.
+    pub(crate) fn field_mut(&mut self) -> &mut Vec<FieldPathElement> {
+        &mut self.field
     }
 
     /// The id of the rule that failed, such as `string.email`, or the `id` of
     /// a custom CEL rule.
     pub(crate) fn rule_id(&self) -> &str {
-        self.proto.rule_id.as_deref().unwrap_or_default()
+        &self.rule.id
     }
 
     /// The human-readable message describing the failure.
     pub(crate) fn message(&self) -> &str {
-        self.proto.message.as_deref().unwrap_or_default()
+        self.message.as_deref().unwrap_or(&self.rule.message)
     }
 
     /// The path to the field that failed, such as `user.emails[0]`.
     ///
     /// It is empty for a message-level rule, which does not apply to a field.
     pub(crate) fn field_path(&self) -> &str {
-        self.field_path
-            .get_or_init(|| path_string(self.proto.field.as_option()))
+        self.field_path.get_or_init(|| path_string(&self.field))
     }
 
     /// The violation as a `buf.validate.Violation`.
-    pub(crate) fn proto(&self) -> &ViolationPb {
-        &self.proto
+    pub(crate) fn proto(&self) -> ViolationPb {
+        let path = |elements: &[FieldPathElement]| {
+            (!elements.is_empty()).then(|| FieldPath {
+                elements: elements.to_vec(),
+                ..Default::default()
+            })
+        };
+        ViolationPb {
+            field: path(&self.field).into(),
+            rule: path(&self.rule.path).into(),
+            rule_id: Some(self.rule.id.clone()),
+            message: Some(self.message().to_owned()),
+            for_key: self.for_key.then_some(true),
+            ..Default::default()
+        }
     }
 }
 
@@ -82,12 +112,9 @@ impl fmt::Display for Violation {
 
 /// Formats a path as `user.emails[0]`, matching the other protovalidate
 /// implementations.
-fn path_string(path: Option<&FieldPath>) -> String {
+fn path_string(elements: &[FieldPathElement]) -> String {
     let mut rendered = String::new();
-    let Some(path) = path else {
-        return rendered;
-    };
-    for (i, element) in path.elements.iter().enumerate() {
+    for (i, element) in elements.iter().enumerate() {
         let name = element.field_name.as_deref().unwrap_or_default();
         // Extension names are already bracketed, as in `[pkg.ext]`.
         if i > 0 && !name.starts_with('[') {
@@ -127,9 +154,11 @@ fn path_string(path: Option<&FieldPath>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Violation, ViolationPb};
+    use std::sync::Arc;
+
+    use super::{RuleInfo, Violation};
     use crate::validate::__buffa::oneof::field_path_element::Subscript;
-    use crate::validate::{FieldPath, FieldPathElement};
+    use crate::validate::FieldPathElement;
 
     fn element(name: &str, subscript: Option<Subscript>) -> FieldPathElement {
         FieldPathElement {
@@ -139,17 +168,18 @@ mod tests {
         }
     }
 
-    fn violation(field: Vec<FieldPathElement>, message: &str, rule_id: &str) -> Violation {
-        Violation::new(ViolationPb {
-            field: Some(FieldPath {
-                elements: field,
-                ..Default::default()
-            })
-            .into(),
-            message: Some(message.to_owned()),
-            rule_id: Some(rule_id.to_owned()),
-            ..Default::default()
+    fn rule(rule_id: &str, message: &str, path: Vec<FieldPathElement>) -> Arc<RuleInfo> {
+        Arc::new(RuleInfo {
+            id: rule_id.to_owned(),
+            message: message.to_owned(),
+            path,
         })
+    }
+
+    fn violation(field: Vec<FieldPathElement>, message: &str, rule_id: &str) -> Violation {
+        let mut violation = Violation::new(rule(rule_id, message, vec![]), None, false);
+        *violation.field_mut() = field;
+        violation
     }
 
     fn rendered(elements: Vec<FieldPathElement>) -> String {
@@ -158,7 +188,10 @@ mod tests {
 
     #[test]
     fn a_message_level_rule_has_no_path() {
-        assert_eq!(Violation::new(ViolationPb::default()).field_path(), "");
+        assert_eq!(
+            Violation::new(rule("", "", vec![]), None, false).field_path(),
+            ""
+        );
         assert_eq!(rendered(vec![]), "");
     }
 
@@ -236,9 +269,33 @@ mod tests {
     }
 
     #[test]
-    fn the_proto_form_is_kept() {
+    fn the_proto_form_is_built_from_the_rule() {
         let violation = violation(vec![], "must be an email", "string.email");
         assert_eq!(violation.rule_id(), "string.email");
-        assert_eq!(violation.proto().rule_id.as_deref(), Some("string.email"));
+        let proto = violation.proto();
+        assert_eq!(proto.rule_id.as_deref(), Some("string.email"));
+        assert_eq!(proto.message.as_deref(), Some("must be an email"));
+        assert!(proto.field.as_option().is_none());
+        assert!(proto.rule.as_option().is_none());
+        assert_eq!(proto.for_key, None);
+
+        let rule_path = vec![element("string", None), element("email", None)];
+        let mut violation = Violation::new(
+            rule("string.email", "must be an email", rule_path.clone()),
+            Some("overridden".to_owned()),
+            true,
+        );
+        violation.field_mut().push(element("email", None));
+        let proto = violation.proto();
+        assert_eq!(proto.message.as_deref(), Some("overridden"));
+        assert_eq!(proto.for_key, Some(true));
+        assert_eq!(
+            proto.field.as_option().map(|path| path.elements.clone()),
+            Some(vec![element("email", None)])
+        );
+        assert_eq!(
+            proto.rule.as_option().map(|path| path.elements.clone()),
+            Some(rule_path)
+        );
     }
 }

@@ -30,6 +30,7 @@ mod string;
 
 use std::fmt::Display;
 use std::mem;
+use std::sync::Arc;
 
 use buffa_descriptor::EnumIndex;
 use buffa_types::google::protobuf::{Duration as DurationPb, Timestamp as TimestampPb};
@@ -41,6 +42,7 @@ use crate::validate::__buffa::oneof;
 use crate::validate::__buffa::oneof::field_rules::Type as RulesType;
 use crate::validate::FieldPathElement;
 use crate::validate::TimestampRules;
+use crate::violation::RuleInfo;
 
 /// A check without its rule path, which is added once the rule field it
 /// comes from is known.
@@ -120,9 +122,11 @@ impl Placement<'_> {
             .checks
             .into_iter()
             .map(|(number, native)| Check {
-                id: native.id,
-                message: native.message,
-                rule_path: (self.path)(number),
+                rule: Arc::new(RuleInfo {
+                    id: native.id,
+                    message: native.message,
+                    path: (self.path)(number),
+                }),
                 test: native.test,
             })
             .collect()
